@@ -37,6 +37,26 @@ export function createSessionRoutes(): Router {
   const router = Router();
 
   /**
+   * Ensure MCP client is connected before serving MCP-backed endpoints.
+   * Returns false if connection cannot be established.
+   */
+  async function ensureMcpConnected(): Promise<boolean> {
+    if (mcpClient.connected) return true;
+
+    try {
+      logger.warn('MCP client not connected when handling request, attempting reconnect...');
+      await mcpClient.connect();
+      return true;
+    } catch (error) {
+      logger.error('Failed to reconnect MCP client', {
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      return false;
+    }
+  }
+
+  /**
    * GET /api/session/status
    * Get the current session status.
    */
@@ -323,6 +343,15 @@ export function createSessionRoutes(): Router {
     }
 
     try {
+      // Players summary is MCP-backed; reconnect on startup race/disconnect windows.
+      if (!(await ensureMcpConnected())) {
+        const errorResponse: ErrorResponse = {
+          error: 'MCP client is not connected yet. Please retry in a few seconds.'
+        };
+        res.status(503).json(errorResponse);
+        return;
+      }
+
       // Get all players from MCP server
       const result = await mcpClient.callTool('get-players', {});
 
@@ -347,7 +376,10 @@ export function createSessionRoutes(): Router {
       };
       res.json(response);
     } catch (error) {
-      logger.error('Failed to get players summary', { error });
+      logger.error('Failed to get players summary', {
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
       const errorResponse: ErrorResponse = {
         error: `Failed to get players summary: ${(error as Error).message}`
       };
