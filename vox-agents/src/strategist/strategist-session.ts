@@ -225,6 +225,7 @@ export class StrategistSession extends VoxSession<StrategistSessionConfig> {
   }
 
   private async handleGameSwitched(params: any): Promise<void> {
+    logger.info('Received GameSwitched notification', params);
     // If nothing is changing, ignore this
     if (params.gameID === this.lastGameID) return;
     if (this.state === 'stopping' || this.state === 'stopped') return;
@@ -260,6 +261,7 @@ export class StrategistSession extends VoxSession<StrategistSessionConfig> {
   }
 
   private async handleDLLConnected(params: any): Promise<void> {
+    logger.info('Received DLLConnected notification', params);
     if (this.config.autoPlay) {
       await this.ensureAutoplayEnabled('dll-connected');
     }
@@ -279,28 +281,65 @@ export class StrategistSession extends VoxSession<StrategistSessionConfig> {
   }
 
   private normalizeLuaResult(result: any): any {
-    const payload = result?.structuredContent ?? result;
-    if (typeof payload === 'string') {
-      try {
-        return JSON.parse(payload);
-      } catch {
-        return payload;
+    const fromStructured = result?.structuredContent;
+    if (fromStructured !== undefined) {
+      if (typeof fromStructured === 'string') {
+        try {
+          return JSON.parse(fromStructured);
+        } catch {
+          return fromStructured;
+        }
+      }
+      return fromStructured;
+    }
+
+    const content = result?.content;
+    if (Array.isArray(content) && content.length > 0) {
+      const first = content[0];
+      if (first?.type === 'text' && typeof first?.text === 'string') {
+        try {
+          return JSON.parse(first.text);
+        } catch {
+          return first.text;
+        }
       }
     }
-    return payload;
+
+    if (typeof result === 'string') {
+      try {
+        return JSON.parse(result);
+      } catch {
+        return result;
+      }
+    }
+
+    return result;
   }
 
   private async executeLuaWithDllRetry(script: string, label: string, maxAttempts = 15): Promise<boolean> {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (this.abortController.signal.aborted || this.state === 'stopping' || this.state === 'stopped') return false;
 
-      const result = this.normalizeLuaResult(await mcpClient.callTool("lua-executor", { Script: script }));
+      const rawResult = await mcpClient.callTool("lua-executor", { Script: script });
+      const result = this.normalizeLuaResult(rawResult);
       const success = result?.Success;
       const errorCode = result?.Error?.Code;
       const errorMessage = result?.Error?.Message as string | undefined;
       const dllDisconnected = errorCode === 'DLL_DISCONNECTED' || /dll\s+is\s+disconnected/i.test(errorMessage ?? '');
 
-      if (success !== false) return true;
+      logger.info(`Lua retry check for ${label} (attempt ${attempt}/${maxAttempts})`, {
+        success,
+        errorCode,
+        errorMessage,
+        state: this.state,
+        gameID: this.gameID,
+        turn: this.turn
+      });
+
+      if (success !== false) {
+        logger.info(`Lua execution succeeded for ${label} (attempt ${attempt}/${maxAttempts})`);
+        return true;
+      }
 
       if (!dllDisconnected) {
         logger.warn(`Lua execution failed for ${label} with non-retryable error`, result?.Error ?? result);
@@ -321,6 +360,13 @@ export class StrategistSession extends VoxSession<StrategistSessionConfig> {
 
   private async ensureAutoplayEnabled(source: string): Promise<void> {
     if (!this.config.autoPlay) return;
+    logger.info(`ensureAutoplayEnabled requested from ${source}`, {
+      gameID: this.gameID,
+      lastGameID: this.lastGameID,
+      turn: this.turn,
+      state: this.state,
+      hasInflight: !!this.autoPlayEnsurePromise
+    });
     if (this.autoPlayEnsurePromise) {
       await this.autoPlayEnsurePromise;
       return;
@@ -338,6 +384,7 @@ export class StrategistSession extends VoxSession<StrategistSessionConfig> {
     const currentGameID = this.gameID ?? this.lastGameID;
 
     if (currentGameID && this.autoPlayAppliedGameID === currentGameID && this.strategicViewAppliedGameID === currentGameID) {
+      logger.info(`Autoplay already applied for game ${currentGameID}, skipping`);
       return;
     }
 
@@ -346,7 +393,10 @@ export class StrategistSession extends VoxSession<StrategistSessionConfig> {
       `autoplay (${source})`
     );
 
-    if (!autoplayApplied) return;
+    if (!autoplayApplied) {
+      logger.warn(`Autoplay command did not apply from ${source}`, { currentGameID, turn: this.turn, state: this.state });
+      return;
+    }
     if (currentGameID) this.autoPlayAppliedGameID = currentGameID;
 
     await setTimeout(3000);
@@ -355,6 +405,14 @@ export class StrategistSession extends VoxSession<StrategistSessionConfig> {
     if (strategicViewApplied && currentGameID) {
       this.strategicViewAppliedGameID = currentGameID;
     }
+
+    logger.info(`ensureAutoplayEnabled finished from ${source}`, {
+      currentGameID,
+      autoplayApplied,
+      strategicViewApplied,
+      autoPlayAppliedGameID: this.autoPlayAppliedGameID,
+      strategicViewAppliedGameID: this.strategicViewAppliedGameID
+    });
   }
 
   private async handlePlayerVictory(params: any): Promise<void> {
