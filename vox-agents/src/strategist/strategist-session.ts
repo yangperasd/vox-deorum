@@ -30,6 +30,8 @@ export class StrategistSession extends VoxSession<StrategistSessionConfig> {
   private finishPromise: Promise<void>;
   private victoryResolve?: () => void;
   private lastGameID?: string;
+  private autoPlayAppliedGameID?: string;
+  private strategicViewAppliedGameID?: string;
   private crashRecoveryAttempts = 0;
   private dllConnected = false;
   private readonly MAX_RECOVERY_ATTEMPTS = 3;
@@ -249,24 +251,17 @@ export class StrategistSession extends VoxSession<StrategistSessionConfig> {
     await mcpClient.callTool("set-metadata", { Key: `experiment`, Value: this.config.name });
     await setTimeout(3000);
 
-    if (this.config.autoPlay && params.turn === 0) {
-      // Autoplay
-      await mcpClient.callTool("lua-executor", {
-        Script: `
-Events.LoadScreenClose();
-Game.SetPausePlayer(-1);
-Game.SetAIAutoPlay(2000, -1);`
-      });
+    if (this.config.autoPlay) {
+      await this.ensureAutoplayEnabled('game-switched');
     } else {
       await mcpClient.callTool("lua-executor", { Script: `Events.LoadScreenClose(); Game.SetPausePlayer(-1);` });
-    }
-    if (this.config.autoPlay) {
-      await setTimeout(3000);
-      await mcpClient.callTool("lua-executor", { Script: `ToggleStrategicView();` });
     }
   }
 
   private async handleDLLConnected(params: any): Promise<void> {
+    if (this.config.autoPlay) {
+      await this.ensureAutoplayEnabled('dll-connected');
+    }
     await this.recoverGame();
   }
 
@@ -274,11 +269,76 @@ Game.SetAIAutoPlay(2000, -1);`
     if (this.state === 'recovering') {
       logger.warn(`Game successfully recovered from crash, resuming play... (autoplay: ${this.config.autoPlay})`);
       this.onStateChange('running');
-      await mcpClient.callTool("lua-executor", { Script: `Events.LoadScreenClose(); Game.SetPausePlayer(-1);` });
       if (this.config.autoPlay) {
-        await setTimeout(3000);
-        await mcpClient.callTool("lua-executor", { Script: `ToggleStrategicView();` });
+        await this.ensureAutoplayEnabled('recovery');
+      } else {
+        await mcpClient.callTool("lua-executor", { Script: `Events.LoadScreenClose(); Game.SetPausePlayer(-1);` });
       }
+    }
+  }
+
+  private normalizeLuaResult(result: any): any {
+    const payload = result?.structuredContent ?? result;
+    if (typeof payload === 'string') {
+      try {
+        return JSON.parse(payload);
+      } catch {
+        return payload;
+      }
+    }
+    return payload;
+  }
+
+  private async executeLuaWithDllRetry(script: string, label: string, maxAttempts = 15): Promise<boolean> {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (this.abortController.signal.aborted || this.state === 'stopping' || this.state === 'stopped') return false;
+
+      const result = this.normalizeLuaResult(await mcpClient.callTool("lua-executor", { Script: script }));
+      const success = result?.Success;
+      const errorCode = result?.Error?.Code;
+      const errorMessage = result?.Error?.Message as string | undefined;
+      const dllDisconnected = errorCode === 'DLL_DISCONNECTED' || /dll\s+is\s+disconnected/i.test(errorMessage ?? '');
+
+      if (success !== false) return true;
+
+      if (!dllDisconnected) {
+        logger.warn(`Lua execution failed for ${label} with non-retryable error`, result?.Error ?? result);
+        return false;
+      }
+
+      if (attempt === maxAttempts) {
+        logger.warn(`Failed to execute ${label} after ${maxAttempts} attempts because DLL stayed disconnected`);
+        return false;
+      }
+
+      logger.warn(`Delaying ${label}; DLL disconnected (attempt ${attempt}/${maxAttempts})`);
+      await setTimeout(2000);
+    }
+
+    return false;
+  }
+
+  private async ensureAutoplayEnabled(source: string): Promise<void> {
+    if (!this.config.autoPlay) return;
+    const currentGameID = this.gameID ?? this.lastGameID;
+
+    if (currentGameID && this.autoPlayAppliedGameID === currentGameID && this.strategicViewAppliedGameID === currentGameID) {
+      return;
+    }
+
+    const autoplayApplied = await this.executeLuaWithDllRetry(
+      `Events.LoadScreenClose(); Game.SetPausePlayer(-1); Game.SetAIAutoPlay(2000, -1);`,
+      `autoplay (${source})`
+    );
+
+    if (!autoplayApplied) return;
+    if (currentGameID) this.autoPlayAppliedGameID = currentGameID;
+
+    await setTimeout(3000);
+
+    const strategicViewApplied = await this.executeLuaWithDllRetry(`ToggleStrategicView();`, `strategic view (${source})`, 5);
+    if (strategicViewApplied && currentGameID) {
+      this.strategicViewAppliedGameID = currentGameID;
     }
   }
 
