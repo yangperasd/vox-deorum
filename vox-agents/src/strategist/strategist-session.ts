@@ -249,8 +249,9 @@ export class StrategistSession extends VoxSession<StrategistSessionConfig> {
     await mcpClient.callTool("set-metadata", { Key: `experiment`, Value: this.config.name });
     await setTimeout(3000);
 
-    if (this.config.autoPlay && params.turn === 0) {
-      // Autoplay
+    if (this.config.autoPlay) {
+      // Autoplay should always be enabled in observe mode, regardless of current turn.
+      // Some game start flows may emit GameSwitched at turn > 0, which previously skipped autoplay.
       await mcpClient.callTool("lua-executor", {
         Script: `
 Events.LoadScreenClose();
@@ -274,10 +275,14 @@ Game.SetAIAutoPlay(2000, -1);`
     if (this.state === 'recovering') {
       logger.warn(`Game successfully recovered from crash, resuming play... (autoplay: ${this.config.autoPlay})`);
       this.onStateChange('running');
-      await mcpClient.callTool("lua-executor", { Script: `Events.LoadScreenClose(); Game.SetPausePlayer(-1);` });
       if (this.config.autoPlay) {
+        await mcpClient.callTool("lua-executor", {
+          Script: `Events.LoadScreenClose(); Game.SetPausePlayer(-1); Game.SetAIAutoPlay(2000, -1);`
+        });
         await setTimeout(3000);
         await mcpClient.callTool("lua-executor", { Script: `ToggleStrategicView();` });
+      } else {
+        await mcpClient.callTool("lua-executor", { Script: `Events.LoadScreenClose(); Game.SetPausePlayer(-1);` });
       }
     }
   }
