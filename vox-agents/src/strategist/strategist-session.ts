@@ -32,6 +32,7 @@ export class StrategistSession extends VoxSession<StrategistSessionConfig> {
   private lastGameID?: string;
   private autoPlayAppliedGameID?: string;
   private strategicViewAppliedGameID?: string;
+  private autoPlayEnsurePromise?: Promise<void>;
   private crashRecoveryAttempts = 0;
   private dllConnected = false;
   private readonly MAX_RECOVERY_ATTEMPTS = 3;
@@ -320,6 +321,20 @@ export class StrategistSession extends VoxSession<StrategistSessionConfig> {
 
   private async ensureAutoplayEnabled(source: string): Promise<void> {
     if (!this.config.autoPlay) return;
+    if (this.autoPlayEnsurePromise) {
+      await this.autoPlayEnsurePromise;
+      return;
+    }
+
+    this.autoPlayEnsurePromise = this.ensureAutoplayEnabledInternal(source)
+      .finally(() => {
+        this.autoPlayEnsurePromise = undefined;
+      });
+
+    await this.autoPlayEnsurePromise;
+  }
+
+  private async ensureAutoplayEnabledInternal(source: string): Promise<void> {
     const currentGameID = this.gameID ?? this.lastGameID;
 
     if (currentGameID && this.autoPlayAppliedGameID === currentGameID && this.strategicViewAppliedGameID === currentGameID) {
